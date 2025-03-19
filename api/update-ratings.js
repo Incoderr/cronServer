@@ -1,22 +1,22 @@
-// api/update-ratings.js
 require('dotenv').config();
 const { MongoClient } = require('mongodb');
 const axios = require('axios');
 
-// Конфигурация
 const MONGODB_URI = process.env.MONGO_URI;
 const SHIKIMORI_API = 'https://shikimori.one/api/graphql';
 
-// Логгер для Vercel (можно заменить на console)
-const logger = {
-  info: console.log,
-  warn: console.warn,
-  error: console.error
-};
+let isUpdating = false;
+let shouldStop = false;
+const logStream = [];
 
-// Функция задержки
 function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function log(message, level = 'info') {
+  const logEntry = { message, level, timestamp: new Date().toISOString() };
+  logStream.push(logEntry);
+  console[level](message);
 }
 
 // Поиск ID аниме
@@ -134,6 +134,14 @@ async function getShikimoriData(animeId) {
 
 // Основная функция обновления
 async function updateRatings() {
+  if (isUpdating) {
+    return { error: 'Update already in progress' };
+  }
+
+  isUpdating = true;
+  shouldStop = false;
+  logStream.length = 0; // Очищаем старые логи
+
   let client;
   try {
     const stats = {
@@ -143,7 +151,6 @@ async function updateRatings() {
       notFound: 0
     };
 
-    // Подключение к MongoDB
     client = new MongoClient(MONGODB_URI);
     await client.connect();
     const db = client.db('anime_db');
@@ -151,9 +158,9 @@ async function updateRatings() {
     
     const animeList = await collection.find({}).toArray();
     stats.total = animeList.length;
-    logger.info(`Found ${animeList.length} anime titles in database`);
+    log(`Found ${animeList.length} anime titles in database`);
 
-    for (let i = 0; i < animeList.length; i++) {
+    for (let i = 0; i < animeList.length && !shouldStop; i++) {
       const anime = animeList[i];
       const animeId = await findAnimeId(anime);
       
@@ -177,14 +184,14 @@ async function updateRatings() {
             }
           );
           stats.updated++;
-          logger.info(`[${i+1}/${animeList.length}] Updated: ${anime.Title || anime.TitleEng || anime.title}`);
+          log(`[${i+1}/${animeList.length}] Updated: ${anime.Title || anime.TitleEng || anime.title}`);
         } else {
           stats.failed++;
-          logger.error(`[${i+1}/${animeList.length}] Failed to get data for: ${anime.Title || anime.TitleEng || anime.title}`);
+          log(`[${i+1}/${animeList.length}] Failed to get data for: ${anime.Title || anime.TitleEng || anime.title}`, 'error');
         }
       } else {
         stats.notFound++;
-        logger.warn(`[${i+1}/${animeList.length}] Anime not found on Shikimori: ${anime.Title || anime.TitleEng || anime.title}`);
+        log(`[${i+1}/${animeList.length}] Anime not found on Shikimori: ${anime.Title || anime.TitleEng || anime.title}`, 'warn');
       }
       
       if (i < animeList.length - 1) {
@@ -193,41 +200,49 @@ async function updateRatings() {
     }
 
     const report = {
-      message: 'Update completed',
-      stats: {
-        total: stats.total,
-        updated: stats.updated,
-        failed: stats.failed,
-        notFound: stats.notFound,
-        successRate: Math.round(stats.updated/stats.total*100)
-      }
+      message: shouldStop ? 'Update stopped' : 'Update completed',
+      stats,
+      stopped: shouldStop
     };
     
-    logger.info('Update completed:', report);
+    log('Update finished:', 'info');
     return report;
   } catch (error) {
-    logger.error('Error updating ratings:', error);
+    log(`Error updating ratings: ${error.message}`, 'error');
     throw error;
   } finally {
-    if (client) {
-      await client.close();
-    }
+    isUpdating = false;
+    if (client) await client.close();
   }
 }
 
-// Vercel Serverless Handler
 module.exports = async (req, res) => {
-  try {
-    if (req.method === 'GET') {
+  if (req.method === 'GET') {
+    if (req.query.action === 'stop') {
+      shouldStop = true;
+      return res.status(200).json({ message: 'Stop signal sent' });
+    } else if (req.query.action === 'logs') {
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+
+      const sendLogs = () => {
+        res.write(`data: ${JSON.stringify(logStream)}\n\n`);
+        if (!isUpdating) {
+          res.end();
+        }
+      };
+
+      const interval = setInterval(sendLogs, 1000);
+      req.on('close', () => {
+        clearInterval(interval);
+        res.end();
+      });
+    } else {
       const result = await updateRatings();
       res.status(200).json(result);
-    } else {
-      res.status(405).json({ error: 'Method not allowed' });
     }
-  } catch (error) {
-    res.status(500).json({ 
-      error: 'Internal server error',
-      message: error.message 
-    });
+  } else {
+    res.status(405).json({ error: 'Method not allowed' });
   }
 };

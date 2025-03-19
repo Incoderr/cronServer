@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Anime Ratings Updater</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; }
+    #logs { 
+      height: 400px; 
+      overflow-y: auto; 
+      border: 1px solid #ccc; 
+      padding: 10px; 
+      background: #f9f9f9; 
+    }
+    .info { color: black; }
+    .warn { color: orange; }
+    .error { color: red; }
+    button { padding: 10px 20px; margin: 10px 0; }
+  </style>
+</head>
+<body>
+  <h1>Anime Ratings Updater</h1>
+  <button id="startBtn">Start Update</button>
+  <button id="stopBtn" disabled>Stop Update</button>
+  <div id="logs"></div>
+
+  <script>
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const logsDiv = document.getElementById('logs');
+    let eventSource;
+
+    startBtn.addEventListener('click', async () => {
+      startBtn.disabled = true;
+      stopBtn.disabled = false;
+      
+      await fetch('/api/update-ratings');
+      
+      eventSource = new EventSource('/api/update-ratings?action=logs');
+      eventSource.onmessage = (event) => {
+        const logs = JSON.parse(event.data);
+        logsDiv.innerHTML = logs.map(log => 
+          `<div class="${log.level}">[${log.timestamp}] ${log.message}</div>`
+        ).join('');
+        logsDiv.scrollTop = logsDiv.scrollHeight;
+        
+        if (!logs.some(l => l.message.includes('Update finished'))) {
+          return;
+        }
+        eventSource.close();
+        startBtn.disabled = false;
+        stopBtn.disabled = true;
+      };
+    });
+
+    stopBtn.addEventListener('click', async () => {
+      await fetch('/api/update-ratings?action=stop');
+      stopBtn.disabled = true;
+    });
+  </script>
+</body>
+</html>
