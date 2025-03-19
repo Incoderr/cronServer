@@ -1,37 +1,33 @@
+// api/update-ratings.js
 require('dotenv').config();
-const fastify = require('fastify')({ logger: true });
 const { MongoClient } = require('mongodb');
-const cron = require('node-cron');
 const axios = require('axios');
 
 // Конфигурация
 const MONGODB_URI = process.env.MONGO_URI;
 const SHIKIMORI_API = 'https://shikimori.one/api/graphql';
 
-// Подключение к MongoDB
-let db;
-async function connectToMongo() {
-  const client = new MongoClient(MONGODB_URI);
-  try {
-    await client.connect();
-    db = client.db('anime_db');
-    fastify.log.info('Connected to MongoDB');
-  } catch (error) {
-    fastify.log.error('MongoDB connection error:', error);
-    process.exit(1);
-  }
+// Логгер для Vercel (можно заменить на console)
+const logger = {
+  info: console.log,
+  warn: console.warn,
+  error: console.error
+};
+
+// Функция задержки
+function delay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// Поиск ID аниме по названию через GraphQL
+// Поиск ID аниме
 async function findAnimeId(anime) {
   const searchTitles = [];
-  
   if (anime.Title) searchTitles.push(anime.Title);
   if (anime.TitleEng) searchTitles.push(anime.TitleEng);
   if (anime.title) searchTitles.push(anime.title);
   
   if (searchTitles.length === 0) {
-    fastify.log.warn('No title found for anime:', anime._id);
+    logger.warn('No title found for anime:', anime._id);
     return null;
   }
   
@@ -47,8 +43,7 @@ async function findAnimeId(anime) {
   
   for (const title of searchTitles) {
     try {
-      fastify.log.info(`Searching for: "${title}"`);
-      
+      logger.info(`Searching for: "${title}"`);
       const response = await axios.post(SHIKIMORI_API, {
         query: searchQuery,
         variables: { search: title }
@@ -67,27 +62,22 @@ async function findAnimeId(anime) {
           const searchTitleLower = title.toLowerCase();
           
           if (resultRussian === searchTitleLower || resultName === searchTitleLower) {
-            fastify.log.info(`Exact match found for "${title}" with ID: ${result.id}`);
+            logger.info(`Exact match found for "${title}" with ID: ${result.id}`);
             return result.id;
           }
         }
-        
-        fastify.log.info(`No exact match for "${title}", using best guess: ${results[0].russian || results[0].name} (ID: ${results[0].id})`);
+        logger.info(`No exact match for "${title}", using best guess: ${results[0].russian || results[0].name} (ID: ${results[0].id})`);
         return results[0].id;
       }
-      
-      fastify.log.warn(`No results found for: "${title}"`);
     } catch (error) {
-      fastify.log.error(`Shikimori search error for "${title}":`, error.message);
+      logger.error(`Shikimori search error for "${title}":`, error.message);
     }
-    
     await delay(500);
   }
-  
   return null;
 }
 
-// Получение детальной информации по ID через GraphQL
+// Получение данных аниме
 async function getShikimoriData(animeId) {
   const query = `
     query ($id: ID) {
@@ -137,18 +127,14 @@ async function getShikimoriData(animeId) {
     }
     return null;
   } catch (error) {
-    fastify.log.error(`Shikimori API error for ID ${animeId}:`, error.message);
+    logger.error(`Shikimori API error for ID ${animeId}:`, error.message);
     return null;
   }
 }
 
-// Функция задержки
-function delay(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-// Функция обновления данных
+// Основная функция обновления
 async function updateRatings() {
+  let client;
   try {
     const stats = {
       total: 0,
@@ -156,16 +142,19 @@ async function updateRatings() {
       failed: 0,
       notFound: 0
     };
-    
+
+    // Подключение к MongoDB
+    client = new MongoClient(MONGODB_URI);
+    await client.connect();
+    const db = client.db('anime_db');
     const collection = db.collection('anime_list');
-    const animeList = await collection.find({}).toArray();
     
+    const animeList = await collection.find({}).toArray();
     stats.total = animeList.length;
-    fastify.log.info(`Found ${animeList.length} anime titles in database`);
+    logger.info(`Found ${animeList.length} anime titles in database`);
 
     for (let i = 0; i < animeList.length; i++) {
       const anime = animeList[i];
-      
       const animeId = await findAnimeId(anime);
       
       if (animeId) {
@@ -188,67 +177,57 @@ async function updateRatings() {
             }
           );
           stats.updated++;
-          fastify.log.info(`[${i+1}/${animeList.length}] Updated: ${anime.Title || anime.TitleEng || anime.title}, score=${data.score}`);
+          logger.info(`[${i+1}/${animeList.length}] Updated: ${anime.Title || anime.TitleEng || anime.title}`);
         } else {
           stats.failed++;
-          fastify.log.error(`[${i+1}/${animeList.length}] Failed to get data for: ${anime.Title || anime.TitleEng || anime.title} (ID: ${animeId})`);
-        }          
+          logger.error(`[${i+1}/${animeList.length}] Failed to get data for: ${anime.Title || anime.TitleEng || anime.title}`);
+        }
       } else {
         stats.notFound++;
-        fastify.log.warn(`[${i+1}/${animeList.length}] Anime not found on Shikimori: ${anime.Title || anime.TitleEng || anime.title}`);
+        logger.warn(`[${i+1}/${animeList.length}] Anime not found on Shikimori: ${anime.Title || anime.TitleEng || anime.title}`);
       }
       
       if (i < animeList.length - 1) {
         await delay(1000);
       }
     }
+
+    const report = {
+      message: 'Update completed',
+      stats: {
+        total: stats.total,
+        updated: stats.updated,
+        failed: stats.failed,
+        notFound: stats.notFound,
+        successRate: Math.round(stats.updated/stats.total*100)
+      }
+    };
     
-    const report = `
-=== ОБНОВЛЕНИЕ ЗАВЕРШЕНО ===
-Всего обработано: ${stats.total} аниме
-Успешно обновлено: ${stats.updated} (${Math.round(stats.updated/stats.total*100)}%)
-Не найдено: ${stats.notFound} (${Math.round(stats.notFound/stats.total*100)}%)
-Ошибки получения данных: ${stats.failed} (${Math.round(stats.failed/stats.total*100)}%)
-============================
-    `;
-    
-    fastify.log.info(report);
-    return stats;
+    logger.info('Update completed:', report);
+    return report;
   } catch (error) {
-    fastify.log.error('Error updating ratings:', error);
-    return { error: error.message };
+    logger.error('Error updating ratings:', error);
+    throw error;
+  } finally {
+    if (client) {
+      await client.close();
+    }
   }
 }
 
-// Endpoint для ручного запуска обновления
-fastify.get('/update-ratings', async (request, reply) => {
-  reply.send({ message: 'Ratings update started' });
-  updateRatings().catch(err => fastify.log.error('Update error:', err));
-});
-
-// Endpoint для проверки статуса сервера
-fastify.get('/health', async (request, reply) => {
-  return { status: 'ok' };
-});
-
-// Запуск сервера
-async function start() {
+// Vercel Serverless Handler
+module.exports = async (req, res) => {
   try {
-    await connectToMongo();
-
-    cron.schedule('0 0 * * *', async () => {
-      fastify.log.info('Starting scheduled ratings update');
-      const stats = await updateRatings();
-      fastify.log.info('Scheduled update completed', stats);
+    if (req.method === 'GET') {
+      const result = await updateRatings();
+      res.status(200).json(result);
+    } else {
+      res.status(405).json({ error: 'Method not allowed' });
+    }
+  } catch (error) {
+    res.status(500).json({ 
+      error: 'Internal server error',
+      message: error.message 
     });
-
-    const port = process.env.PORT || 3000;
-    await fastify.listen({ port, host: '0.0.0.0' });
-    fastify.log.info(`Server listening on ${fastify.server.address().port}`);
-  } catch (err) {
-    fastify.log.error(err);
-    process.exit(1);
   }
-}
-
-start();
+};
