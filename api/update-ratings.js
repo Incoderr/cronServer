@@ -1,3 +1,4 @@
+// api/update-ratings.js
 require('dotenv').config();
 const { MongoClient } = require('mongodb');
 const axios = require('axios');
@@ -19,7 +20,6 @@ function log(message, level = 'info') {
   console[level](message);
 }
 
-// Поиск ID аниме
 async function findAnimeId(anime) {
   const searchTitles = [];
   if (anime.Title) searchTitles.push(anime.Title);
@@ -27,7 +27,7 @@ async function findAnimeId(anime) {
   if (anime.title) searchTitles.push(anime.title);
   
   if (searchTitles.length === 0) {
-    logger.warn('No title found for anime:', anime._id);
+    log('No title found for anime: ' + JSON.stringify(anime), 'warn');
     return null;
   }
   
@@ -43,7 +43,7 @@ async function findAnimeId(anime) {
   
   for (const title of searchTitles) {
     try {
-      logger.info(`Searching for: "${title}"`);
+      log(`Searching Shikimori for: "${title}"`);
       const response = await axios.post(SHIKIMORI_API, {
         query: searchQuery,
         variables: { search: title }
@@ -55,29 +55,33 @@ async function findAnimeId(anime) {
       });
 
       const results = response.data.data?.animes;
-      if (results && results.length > 0) {
-        for (const result of results) {
-          const resultRussian = result.russian?.toLowerCase() || '';
-          const resultName = result.name?.toLowerCase() || '';
-          const searchTitleLower = title.toLowerCase();
-          
-          if (resultRussian === searchTitleLower || resultName === searchTitleLower) {
-            logger.info(`Exact match found for "${title}" with ID: ${result.id}`);
-            return result.id;
-          }
-        }
-        logger.info(`No exact match for "${title}", using best guess: ${results[0].russian || results[0].name} (ID: ${results[0].id})`);
-        return results[0].id;
+      if (!results) {
+        log(`No results from Shikimori API for "${title}"`, 'warn');
+        continue;
       }
+
+      log(`Found ${results.length} results for "${title}"`);
+      for (const result of results) {
+        const resultRussian = result.russian?.toLowerCase() || '';
+        const resultName = result.name?.toLowerCase() || '';
+        const searchTitleLower = title.toLowerCase();
+        
+        if (resultRussian === searchTitleLower || resultName === searchTitleLower) {
+          log(`Exact match found for "${title}" with ID: ${result.id}`);
+          return result.id;
+        }
+      }
+      
+      log(`No exact match for "${title}", using best guess: ${results[0].russian || results[0].name} (ID: ${results[0].id})`);
+      return results[0].id;
     } catch (error) {
-      logger.error(`Shikimori search error for "${title}":`, error.message);
+      log(`Shikimori search error for "${title}": ${error.message}`, 'error');
     }
     await delay(500);
   }
   return null;
 }
 
-// Получение данных аниме
 async function getShikimoriData(animeId) {
   const query = `
     query ($id: ID) {
@@ -103,6 +107,7 @@ async function getShikimoriData(animeId) {
   `;
 
   try {
+    log(`Fetching details for anime ID: ${animeId}`);
     const response = await axios.post(SHIKIMORI_API, {
       query,
       variables: { id: animeId }
@@ -114,50 +119,59 @@ async function getShikimoriData(animeId) {
     });
 
     const anime = response.data.data?.animes[0];
-    if (anime) {
-      return {
-        score: anime.score,
-        episodes: anime.episodes,
-        status: anime.status,
-        url: anime.url,
-        genres: anime.genres.map(g => ({ name: g.name, russian: g.russian })),
-        studios: anime.studios.map(s => s.name),
-        externalLinks: anime.externalLinks.map(l => ({ kind: l.kind, url: l.url }))
-      };
+    if (!anime) {
+      log(`No data returned for anime ID: ${animeId}`, 'warn');
+      return null;
     }
-    return null;
+
+    log(`Successfully fetched data for ID: ${animeId}`);
+    return {
+      score: anime.score,
+      episodes: anime.episodes,
+      status: anime.status,
+      url: anime.url,
+      genres: anime.genres.map(g => ({ name: g.name, russian: g.russian })),
+      studios: anime.studios.map(s => s.name),
+      externalLinks: anime.externalLinks.map(l => ({ kind: l.kind, url: l.url }))
+    };
   } catch (error) {
-    logger.error(`Shikimori API error for ID ${animeId}:`, error.message);
+    log(`Shikimori API error for ID ${animeId}: ${error.message}`, 'error');
     return null;
   }
 }
 
-// Основная функция обновления
 async function updateRatings() {
   if (isUpdating) {
+    log('Update already in progress', 'warn');
     return { error: 'Update already in progress' };
   }
 
   isUpdating = true;
   shouldStop = false;
-  logStream.length = 0; // Очищаем старые логи
+  logStream.length = 0;
 
   let client;
   try {
-    const stats = {
-      total: 0,
-      updated: 0,
-      failed: 0,
-      notFound: 0
-    };
-
+    log('Connecting to MongoDB');
     client = new MongoClient(MONGODB_URI);
     await client.connect();
     const db = client.db('anime_db');
     const collection = db.collection('anime_list');
     
+    log('Fetching anime list from database');
     const animeList = await collection.find({}).toArray();
-    stats.total = animeList.length;
+    
+    if (!animeList.length) {
+      log('No anime found in database!', 'error');
+      return { error: 'No anime found in database' };
+    }
+
+    const stats = {
+      total: animeList.length,
+      updated: 0,
+      failed: 0,
+      notFound: 0
+    };
     log(`Found ${animeList.length} anime titles in database`);
 
     for (let i = 0; i < animeList.length && !shouldStop; i++) {
@@ -168,6 +182,7 @@ async function updateRatings() {
         const data = await getShikimoriData(animeId);
         
         if (data) {
+          log(`Updating database for anime: ${anime.Title || anime.TitleEng || anime.title}`);
           await collection.updateOne(
             { _id: anime._id },
             {
@@ -205,18 +220,24 @@ async function updateRatings() {
       stopped: shouldStop
     };
     
-    log('Update finished:', 'info');
+    log('Update finished', 'info');
     return report;
   } catch (error) {
-    log(`Error updating ratings: ${error.message}`, 'error');
+    log(`Error in updateRatings: ${error.message}`, 'error');
     throw error;
   } finally {
     isUpdating = false;
-    if (client) await client.close();
+    if (client) {
+      log('Closing MongoDB connection');
+      await client.close();
+    }
   }
 }
 
 module.exports = async (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET');
+
   if (req.method === 'GET') {
     if (req.query.action === 'stop') {
       shouldStop = true;
@@ -239,8 +260,12 @@ module.exports = async (req, res) => {
         res.end();
       });
     } else {
-      const result = await updateRatings();
-      res.status(200).json(result);
+      try {
+        const result = await updateRatings();
+        res.status(200).json(result);
+      } catch (error) {
+        res.status(500).json({ error: error.message });
+      }
     }
   } else {
     res.status(405).json({ error: 'Method not allowed' });
