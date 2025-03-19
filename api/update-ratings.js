@@ -5,6 +5,7 @@ const axios = require('axios');
 
 const MONGODB_URI = process.env.MONGO_URI;
 const SHIKIMORI_API = 'https://shikimori.one/api/graphql';
+const SHIKIMORI_TOKEN = process.env.SHIKIMORI_TOKEN; // Новый токен из .env
 
 let isUpdating = false;
 let shouldStop = false;
@@ -50,7 +51,8 @@ async function findAnimeId(anime) {
       }, {
         headers: {
           'User-Agent': 'AnimeRatingUpdater',
-          'Content-Type': 'application/json'
+          'Content-Type': 'application/json',
+          ...(SHIKIMORI_TOKEN && { 'Authorization': `Bearer ${SHIKIMORI_TOKEN}` }) // Добавляем токен, если он есть
         }
       });
 
@@ -114,17 +116,20 @@ async function getShikimoriData(animeId) {
     }, {
       headers: {
         'User-Agent': 'AnimeRatingUpdater',
-        'Content-Type': 'application/json'
+        'Content-Type': 'application/json',
+        ...(SHIKIMORI_TOKEN && { 'Authorization': `Bearer ${SHIKIMORI_TOKEN}` }) // Добавляем токен, если он есть
       }
     });
 
+    log(`Raw response from Shikimori for ID ${animeId}: ${JSON.stringify(response.data)}`);
+    
     const anime = response.data.data?.animes[0];
     if (!anime) {
-      log(`No data returned for anime ID: ${animeId}`, 'warn');
+      log(`No anime data returned for ID: ${animeId}. Full response: ${JSON.stringify(response.data)}`, 'warn');
       return null;
     }
 
-    log(`Successfully fetched data for ID: ${animeId}`);
+    log(`Successfully fetched data for ID: ${animeId}. Score: ${anime.score}, Episodes: ${anime.episodes}`);
     return {
       score: anime.score,
       episodes: anime.episodes,
@@ -135,7 +140,7 @@ async function getShikimoriData(animeId) {
       externalLinks: anime.externalLinks.map(l => ({ kind: l.kind, url: l.url }))
     };
   } catch (error) {
-    log(`Shikimori API error for ID ${animeId}: ${error.message}`, 'error');
+    log(`Shikimori API error for ID ${animeId}: ${error.message}. Response: ${error.response?.data ? JSON.stringify(error.response.data) : 'No response'}`, 'error');
     return null;
   }
 }
@@ -144,6 +149,10 @@ async function updateRatings() {
   if (isUpdating) {
     log('Update already in progress', 'warn');
     return { error: 'Update already in progress' };
+  }
+
+  if (!SHIKIMORI_TOKEN) {
+    log('SHIKIMORI_TOKEN is not set in environment variables', 'error');
   }
 
   isUpdating = true;
