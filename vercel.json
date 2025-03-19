@@ -6,7 +6,7 @@
       "use": "@vercel/node"
     },
     {
-      "src": "/public/index.html",
+      "src": "public/index.html",
       "use": "@vercel/static"
     }
   ],
@@ -23,7 +23,7 @@
     },
     {
       "src": "/(.*)",
-      "dest": "index.html"
+      "dest": "public/index.html"
     }
   ],
   "crons": [
