@@ -50,7 +50,7 @@ async function findAnimeId(anime) {
         variables: { search: title }
       }, {
         headers: {
-          'User-Agent': 'AnimeRatingUpdater',
+          'User-Agent': 'AniHome',
           'Content-Type': 'application/json',
           ...(SHIKIMORI_TOKEN && { 'Authorization': `Bearer ${SHIKIMORI_TOKEN}` }) // Добавляем токен, если он есть
         }
